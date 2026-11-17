@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Secrets and local environment files
+.env
+.env.*
+*.env
+
+# Claude Provider Manager runtime data
+.claude-provider/
+*.settings.json
+*.discovery.json
+
+# Local backups
+*.backup
+*.bak
+*.old
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,565 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import re
+import json
+import shutil
+import subprocess
+import getpass
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+ROOT = Path.home() / ".claude-provider"
+PROVIDERS = ROOT / "providers"
+ACTIVE = ROOT / "active"
+DONATE_URL = "https://ko-fi.com/aliasnull"
+VERSION = "1.0.0"
+PROJECT = "Claude Provider Manager"
+
+def show_banner():
+    width = 56
+    print("+" + "-" * width + "+")
+    print("|" + PROJECT.center(width) + "|")
+    print("|" + "A CLI Provider Manager by AliasNull".center(width) + "|")
+    print("+" + "-" * width + "+")
+    print(f"                 Version {VERSION}")
+    print()
+
+KEYS = [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+]
+
+def secure(path, content):
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o600)
+
+def valid_name(name):
+    return bool(re.fullmatch(r"[a-zA-Z0-9_-]{1,40}", name))
+
+def provider_path(name):
+    if not valid_name(name):
+        raise ValueError("Invalid provider name.")
+    return PROVIDERS / f"{name}.env"
+
+def load_provider(name):
+    path = provider_path(name)
+    if not path.is_file():
+        raise ValueError(f"Provider '{name}' does not exist.")
+
+    data = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key in KEYS:
+            data[key] = json.loads(value)
+
+    return data
+
+def save_provider(name, data):
+    path = provider_path(name)
+    content = "".join(
+        f"{key}={json.dumps(data.get(key, ''), ensure_ascii=False)}\n"
+        for key in KEYS if data.get(key, "")
+    )
+    secure(path, content)
+
+def configure_discovery(name):
+    current = load_discovery(name)
+    current_mode = current.get("mode", "all")
+    current_value = current.get("value", "")
+
+    print()
+    print("Model discovery mode:")
+    print("  1. all    - All available models")
+    print("  2. suffix - Match model ID suffix")
+    print("  3. prefix - Match model ID prefix")
+    print("  4. manual - Select model IDs manually")
+
+    choices = {
+        "1": "all", "2": "suffix",
+        "3": "prefix", "4": "manual"
+    }
+
+    choice = input(f"Choose [1-4, ENTER={current_mode}]: ").strip()
+    mode = choices.get(choice, choice) if choice else current_mode
+
+    if mode not in ("all", "suffix", "prefix", "manual"):
+        raise ValueError("Invalid model discovery mode.")
+
+    value = ""
+    if mode in ("suffix", "prefix"):
+        value = input(f"Filter {mode} [{current_value}]: ").strip()
+        if not value:
+            value = current_value
+        if not value:
+            raise ValueError(f"A {mode} filter is required.")
+
+    elif mode == "manual":
+        existing = current_value
+        if isinstance(existing, list):
+            existing = ", ".join(existing)
+        value = input(f"Model IDs, comma-separated [{existing}]: ").strip()
+        if not value:
+            value = existing
+        value = [item.strip() for item in value.split(",") if item.strip()]
+        if not value:
+            raise ValueError("At least one model ID is required.")
+
+    save_discovery(name, {"mode": mode, "value": value})
+    print(f"Model discovery mode saved: {mode}")
+
+
+def add_provider(name, editing=False):
+    path = provider_path(name)
+    exists = path.exists()
+
+    if exists and not editing:
+        if input(f"Provider '{name}' exists. Overwrite? [y/N]: ").lower() != "y":
+            return
+
+    old = load_provider(name) if exists else {}
+
+    print(f"\n{'Edit' if editing else 'Add'} provider: {name}")
+    print("Press ENTER to keep existing values while editing.\n")
+
+    data = {}
+
+    def ask(key, label, secret=False, required=False):
+        current = old.get(key, "")
+        if secret:
+            value = getpass.getpass(f"{label}: ")
+        else:
+            value = input(f"{label} [{current}]: ").strip()
+
+        if not value:
+            value = current
+
+        if required and not value:
+            raise ValueError(f"{label} is required.")
+
+        return value
+
+    data["ANTHROPIC_BASE_URL"] = ask(
+        "ANTHROPIC_BASE_URL", "Base URL", required=True
+    )
+    data["ANTHROPIC_AUTH_TOKEN"] = ask(
+        "ANTHROPIC_AUTH_TOKEN", "API Key / Auth Token", secret=True,
+        required=True
+    )
+    data["ANTHROPIC_MODEL"] = ask(
+        "ANTHROPIC_MODEL", "Default Model", required=True
+    )
+
+    for key, label in [
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", "Sonnet Model"),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", "Opus Model"),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "Haiku Model"),
+    ]:
+        data[key] = ask(key, label)
+
+    configure_discovery(name)
+    save_provider(name, data)
+
+    if not ACTIVE.exists():
+        secure(ACTIVE, name + "\n")
+
+    print(f"\nProvider '{name}' saved securely.")
+
+def list_providers():
+    active = ACTIVE.read_text().strip() if ACTIVE.exists() else None
+    files = sorted(PROVIDERS.glob("*.env"))
+
+    if not files:
+        print("No providers configured.")
+        return
+
+    print("\nConfigured providers:\n")
+    for file in files:
+        name = file.stem
+        marker = " * ACTIVE" if name == active else ""
+        print(f"  {name}{marker}")
+    print()
+
+def use_provider(name):
+    load_provider(name)
+    secure(ACTIVE, name + "\n")
+    print(f"Active provider: {name}")
+
+def current_provider():
+    if not ACTIVE.exists():
+        print("No active provider.")
+        return
+
+    name = ACTIVE.read_text().strip()
+    data = load_provider(name)
+
+    print(f"Active provider : {name}")
+    print(f"Base URL        : {data.get('ANTHROPIC_BASE_URL', '')}")
+    print(f"Default Model   : {data.get('ANTHROPIC_MODEL', '')}")
+    print("API Key         : ******** (hidden)")
+
+def remove_provider(name):
+    path = provider_path(name)
+    if not path.exists():
+        raise ValueError(f"Provider '{name}' does not exist.")
+
+    if input(f"Delete provider '{name}' permanently? [y/N]: ").lower() != "y":
+        print("Cancelled.")
+        return
+
+    path.unlink()
+
+    for sidecar in (settings_path(name), discovery_path(name)):
+        if sidecar.exists():
+            sidecar.unlink()
+
+    if ACTIVE.exists() and ACTIVE.read_text().strip() == name:
+        ACTIVE.unlink()
+
+    print(f"Provider '{name}' removed.")
+
+def settings_path(name):
+    return PROVIDERS / f"{name}.settings.json"
+
+def discovery_path(name):
+    return PROVIDERS / f"{name}.discovery.json"
+
+def load_discovery(name):
+    path = discovery_path(name)
+    if not path.exists():
+        return {"mode": "all", "value": ""}
+
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        raise ValueError(f"Invalid discovery configuration for '{name}': {e}")
+
+    if not isinstance(config, dict):
+        raise ValueError(f"Invalid discovery configuration for '{name}'.")
+
+    return config
+
+def save_discovery(name, config):
+    secure(
+        discovery_path(name),
+        json.dumps(config, indent=2) + "\n"
+    )
+
+def sync_models(name):
+    data = load_provider(name)
+    discovery = load_discovery(name)
+
+    base = data["ANTHROPIC_BASE_URL"].rstrip("/")
+    url = base + ("/models" if base.endswith("/v1") else "/v1/models")
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": "Bearer " + data["ANTHROPIC_AUTH_TOKEN"],
+            "Accept": "application/json"
+        }
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            catalog = json.load(response)
+    except urllib.error.HTTPError as e:
+        raise ValueError(f"Provider API returned HTTP {e.code}")
+    except Exception as e:
+        raise ValueError(f"Model catalog request failed: {e}")
+
+    models = catalog.get("data", [])
+    if not isinstance(models, list):
+        raise ValueError("Provider returned an invalid model catalog.")
+
+    model_ids = list(dict.fromkeys(
+        item["id"] for item in models
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and item["id"]
+    ))
+
+    mode = discovery.get("mode", "all")
+    value = discovery.get("value", "")
+
+    if mode == "all":
+        selected = model_ids
+    elif mode == "suffix":
+        if not isinstance(value, str) or not value:
+            raise ValueError("A valid suffix filter is required.")
+        selected = [mid for mid in model_ids if mid.endswith(value)]
+    elif mode == "prefix":
+        if not isinstance(value, str) or not value:
+            raise ValueError("A valid prefix filter is required.")
+        selected = [mid for mid in model_ids if mid.startswith(value)]
+    elif mode == "manual":
+        if (
+            not isinstance(value, list)
+            or not value
+            or any(not isinstance(mid, str) or not mid.strip() for mid in value)
+        ):
+            raise ValueError("Manual mode requires valid model IDs.")
+
+        value = list(dict.fromkeys(mid.strip() for mid in value))
+        selected = [mid for mid in value if mid in model_ids]
+        missing = [mid for mid in value if mid not in model_ids]
+        if missing:
+            print("Unavailable manual model IDs skipped: " + ", ".join(missing))
+    else:
+        raise ValueError(f"Unsupported discovery mode: {mode}")
+
+    if not selected:
+        raise ValueError(f"No models matched discovery mode '{mode}'.")
+
+    options = []
+    for model_id in selected:
+        label = model_id.replace("-", " ").replace("_", " ").title()
+        options.append({
+            "model": model_id,
+            "label": label,
+            "description": "Available model from configured provider"
+        })
+
+    default = data.get("ANTHROPIC_MODEL", "")
+    if default not in selected:
+        default = selected[0]
+
+    settings = {
+        "model": default,
+        "modelPicker": {
+            "options": options,
+            "replaceBuiltInOptions": True
+        }
+    }
+
+    secure(
+        settings_path(name),
+        json.dumps(settings, indent=2) + "\n"
+    )
+
+    print(f"Synced {len(options)} models for '{name}' (mode: {mode}):")
+    for option in options:
+        print("  - " + option["model"])
+
+
+def test_provider(name):
+    data = load_provider(name)
+
+    base = data["ANTHROPIC_BASE_URL"].rstrip("/")
+    url = base + ("/models" if base.endswith("/v1") else "/v1/models")
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": "Bearer " + data["ANTHROPIC_AUTH_TOKEN"],
+            "Accept": "application/json"
+        }
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            catalog = json.load(response)
+            status = response.status
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise ValueError(
+                f"Authentication/access failed (HTTP {e.code}). "
+                "Check the API key and provider account permissions."
+            )
+        raise ValueError(f"Provider API returned HTTP {e.code}")
+    except Exception as e:
+        raise ValueError(f"Connection test failed: {e}")
+
+    models = catalog.get("data")
+    if not isinstance(models, list):
+        raise ValueError("API responded, but returned an invalid model catalog.")
+
+    free = [
+        m for m in models
+        if isinstance(m, dict)
+        and isinstance(m.get("id"), str)
+        and m["id"].endswith(":free")
+    ]
+
+    print(f"Provider       : {name}")
+    print(f"HTTP status    : {status}")
+    print(f"Authentication : Successful")
+    print(f"Total models   : {len(models)}")
+    print(f"Free-suffix models: {len(free)}")
+
+
+def sync_all():
+    files = sorted(PROVIDERS.glob("*.env"))
+    if not files:
+        raise ValueError("No providers configured.")
+
+    succeeded = 0
+    failed = 0
+
+    for path in files:
+        name = path.stem
+        print(f"\nSyncing provider: {name}")
+        try:
+            sync_models(name)
+            succeeded += 1
+        except Exception as e:
+            failed += 1
+            print(f"Failed to sync '{name}': {e}", file=sys.stderr)
+
+    print(f"\nSync summary: {succeeded} succeeded, {failed} failed.")
+    if failed:
+        raise ValueError("Some providers could not be synced.")
+
+
+def show_models(name):
+    path = settings_path(name)
+    if not path.exists():
+        raise ValueError("Run claude-provider sync first.")
+
+    settings = json.loads(path.read_text())
+    options = settings.get("modelPicker", {}).get("options", [])
+
+    print(f"Models for {name}:")
+    for item in options:
+        print(f"  {item['label']}  [{item['model']}]")
+
+def launch(provider=None, args=None):
+    if provider is None:
+        if not ACTIVE.exists():
+            raise ValueError("No active provider. Run: claude-provider use NAME")
+        provider = ACTIVE.read_text().strip()
+
+    data = load_provider(provider)
+
+    config = settings_path(provider)
+    if not config.exists():
+        raise ValueError(
+            f"No model catalog synced. Run: claude-provider sync {provider}"
+        )
+
+    executable = shutil.which("claude")
+    if not executable:
+        raise ValueError("Claude Code executable not found in PATH.")
+
+    env = os.environ.copy()
+    for key in KEYS:
+        env.pop(key, None)
+
+    env.update({k: v for k, v in data.items() if v})
+
+    print(f"Launching Claude Code with provider: {provider}")
+    os.execvpe(
+        executable,
+        [executable, "--settings", str(config)] + (args or []),
+        env
+    )
+
+def main():
+    ROOT.mkdir(parents=True, exist_ok=True)
+    PROVIDERS.mkdir(parents=True, exist_ok=True)
+    ROOT.chmod(0o700)
+    PROVIDERS.chmod(0o700)
+
+    args = sys.argv[1:]
+    command = args[0] if args else "help"
+
+    try:
+        if command in ("--version", "-V", "version"):
+            print(f"{PROJECT} v{VERSION} by AliasNull")
+
+        elif command == "donate":
+            print("Support AliasNull and open-source development:")
+            print(DONATE_URL)
+
+        elif command == "add" and len(args) == 2:
+            add_provider(args[1])
+
+        elif command == "list":
+            list_providers()
+
+        elif command == "use" and len(args) == 2:
+            use_provider(args[1])
+
+        elif command == "current":
+            current_provider()
+
+        elif command == "edit" and len(args) == 2:
+            add_provider(args[1], editing=True)
+
+        elif command == "remove" and len(args) == 2:
+            remove_provider(args[1])
+
+        elif command == "sync":
+            if len(args) == 2 and args[1] == "--all":
+                sync_all()
+            else:
+                name = args[1] if len(args) == 2 else (
+                    ACTIVE.read_text().strip() if ACTIVE.exists() else None
+                )
+                if not name:
+                    raise ValueError("Specify a provider name.")
+                sync_models(name)
+
+        elif command == "test":
+            name = args[1] if len(args) == 2 else (
+                ACTIVE.read_text().strip() if ACTIVE.exists() else None
+            )
+            if not name:
+                raise ValueError("Specify a provider name.")
+            test_provider(name)
+
+        elif command == "models":
+            name = args[1] if len(args) == 2 else (
+                ACTIVE.read_text().strip() if ACTIVE.exists() else None
+            )
+            if not name:
+                raise ValueError("Specify a provider name.")
+            show_models(name)
+
+        elif command == "launch":
+            rest = args[1:]
+            provider = None
+
+            if rest and rest[0] != "--":
+                provider = rest.pop(0)
+
+            if rest and rest[0] == "--":
+                rest.pop(0)
+
+            launch(provider, rest)
+
+        elif command in ("help", "--help", "-h"):
+            show_banner()
+            print("""Usage:
+  claude-provider add NAME
+  claude-provider list
+  claude-provider use NAME
+  claude-provider current
+  claude-provider edit NAME
+  claude-provider remove NAME
+  claude-provider test [NAME]
+  claude-provider sync [NAME]
+  claude-provider sync --all
+  claude-provider models [NAME]
+  claude-provider launch [NAME] [-- CLAUDE_ARGS]
+  claude-provider donate
+  claude-provider --version
+""")
+
+        else:
+            raise ValueError(f"Unknown command: {command}. Use --help.")
+
+    except (ValueError, OSError, json.JSONDecodeError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
