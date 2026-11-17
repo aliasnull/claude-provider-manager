@@ -41,7 +41,7 @@ Install and configure Claude Code separately, following its official installatio
 Clone this repository:
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USERNAME/claude-provider-manager.git
+git clone https://github.com/aliasnull/claude-provider-manager.git
 cd claude-provider-manager
 ```
 
