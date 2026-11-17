@@ -38,34 +38,32 @@ Install and configure Claude Code separately, following its official installatio
 
 <https://code.claude.com/docs/en/overview>
 
-Clone this repository:
+Install Claude Provider Manager with one command:
 
 ```bash
-git clone https://github.com/aliasnull/claude-provider-manager.git
-cd claude-provider-manager
+curl -fsSL https://raw.githubusercontent.com/aliasnull/claude-provider-manager/main/install.sh | sh
 ```
 
-Make the script executable:
+The installer downloads the manager, installs it to `~/.local/bin`, and configures your shell PATH when needed.
+
+Requirements:
+- Python 3.8 or newer
+- Official Claude Code CLI installed and available in PATH
+- curl or wget
+
+Open a new terminal session, then run:
 
 ```bash
-chmod +x claude-provider
+claude-provider --help
 ```
 
-Run it directly:
+To upgrade an existing installation:
 
 ```bash
-./claude-provider --help
+curl -fsSL https://raw.githubusercontent.com/aliasnull/claude-provider-manager/main/install.sh | sh -s -- --upgrade
 ```
 
-To run it as a command from anywhere, place it in a directory on your `PATH`, for example:
-
-```bash
-mkdir -p ~/.local/bin
-cp claude-provider ~/.local/bin/claude-provider
-chmod 700 ~/.local/bin/claude-provider
-```
-
-Make sure `~/.local/bin` is included in your `PATH`.
+The installer will not overwrite an existing installation unless `--upgrade` is explicitly provided.
 
 ## Quick start
 
